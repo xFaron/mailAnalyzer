@@ -1,12 +1,15 @@
 import os.path
 import base64
+from datetime import datetime
 
+from google import genai
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+debug = False
 
 class Gmail_API:
   def __init__(self):
@@ -76,21 +79,24 @@ class Msg:
           byte_string = base64.urlsafe_b64decode(raw_string)
           decoded_string = byte_string.decode("utf-8")
 
-        elif "image" in content_type.lower():
-          #TODO <-- get the image in base64 encoded format. LLMs can take that as input
-          pass
+        # elif "image" in content_type.lower():
+        #   #TODO <-- get the image in base64 encoded format. LLMs can take that as input
+        #   pass
 
-        msg['body'].append({
-          "type": content_type,
-          "data": decoded_string,
-          "filename": payload['filename']
-        })
+          msg['body'].append({
+            "type": content_type,
+            "data": decoded_string,
+            "filename": payload['filename']
+          })
 
 
-    return (msgId, threadId, msg)
+    return (msgId, threadId, msg.copy())
   
   @staticmethod
-  def extract_payloads(top_level_payload, returnList = []):
+  def extract_payloads(top_level_payload, returnList = None):
+    if returnList is None:
+      returnList = []
+
     try:
       parts = top_level_payload['parts']
       for part in parts:
@@ -103,9 +109,16 @@ class Msg:
 
   def extract_date(self):
     if self.id:
-      pass
+      try:
+        date_string = self.msg['date']
+        msg_date = datetime.strptime(date_string, "%a, %d %b %Y %H:%M:%S %z")
+        return msg_date
+      except:
+        print("No associated date found")
     else:
       print("No message Id was passed during initialization")
+    
+    return None
 
 
 class Thread:
@@ -118,6 +131,8 @@ class Thread:
 
   @staticmethod
   def parse(gmail_thread_obj):
+    messages = {}
+
     threadId = gmail_thread_obj['id']
     messages = [Msg(msg) for msg in gmail_thread_obj['messages']]
 
@@ -125,7 +140,12 @@ class Thread:
 
   def retrieve_latest(self):
     if self.id:
-      pass
+      req_message = self.msgs[0]
+      for msg in self.msgs[1:]:
+        if req_message.extract_date() < msg.extract_date():
+          req_message = msg
+
+      return req_message
     else:
       print("No thread Id was passed during initialization")
 
@@ -133,29 +153,44 @@ class Thread:
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
+def retrieveEmails(api) :
+  messages = []
+
+  results = api.service.users().threads().list(userId="me", labelIds=["INBOX", "UNREAD"]).execute()
+  threadIds = results.get("threads", [])
+
+  if not threadIds:
+    print("No threads found.")
+    return
+
+  for id_ in threadIds:
+    result = api.service.users().threads().get(userId="me", id=id_["id"]).execute()
+    tempThread = Thread(result)
+    messages.append(tempThread.retrieve_latest())
+
+  return messages
+
 def main():
-    # Init API
-    api = Gmail_API()
-    messages = []
+  # Init API
+  print("Starting API")
+  api = Gmail_API()
+  client = None
+  with open("key.txt") as file:
+    client = genai.Client(api_key=f"{file.read()}")
 
-    # Get message Id's
-    results = api.service.users().messages().list(userId="me").execute()
-    messagesIds = results.get("messages", [])
+  # Retrieve Unread Emails
+  print("Retrieving Unread mails")
+  messages = retrieveEmails(api)
 
-    #print(f"ThreadIds are", "Distinct" if len(list(map(lambda x: x['threadId'], messagesIds))) == len(set(map(lambda x: x['threadId'], messagesIds))) else "Not Distinct")
-
-    if not messagesIds:
-      print("No message_Ids found.")
-      return
-
-    # Get the messages
-    for id_ in messagesIds:
-      result = api.service.users().messages().get(userId="me", id=id_["id"]).execute()
-      #print(result["snippet"])
-      messages.append(Msg(result))
+  print("Summarizing")
+  with open('prompt1.md') as file:
+    prompt = file.read()
 
     for msg_obj in messages:
-      print(str(msg_obj.msg['body'][0]["data"]))
-
+      response = client.models.generate_content(
+          model="gemini-2.0-flash-thinking-exp-01-21", contents=f"{prompt}\n{msg_obj.msg}"
+      )
+      print(response.text)
+    
 if __name__ == "__main__":
   main()
